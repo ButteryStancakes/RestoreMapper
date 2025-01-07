@@ -104,6 +104,9 @@ namespace RestoreMapper
         [HarmonyPostfix]
         static void MapDevicePostStart(MapDevice __instance)
         {
+            if (!__instance.mapCamera.CompareTag("MapCamera"))
+                return;
+
             // copy the camera object
             RenderTexture orig = __instance.mapCamera.targetTexture;
             __instance.mapCamera = Object.Instantiate(__instance.mapCamera.gameObject, __instance.mapCamera.transform.parent).GetComponent<Camera>();
