@@ -91,7 +91,7 @@ namespace RestoreMapper
         [HarmonyPrefix]
         static bool MapDevicePreStart(MapDevice __instance)
         {
-            if (__instance.mapCamera != null && !__instance.mapCamera.CompareTag("MapCamera"))
+            if (__instance.mapCamera != null)
             {
                 Plugin.Logger.LogWarning($"Mapper #{__instance.GetInstanceID()} tried to call Start() more than once, this is dangerous and would've caused a memory leak");
                 return false;
@@ -204,7 +204,7 @@ namespace RestoreMapper
             {
                 foreach (MapDevice mapDevice in Object.FindObjectsOfType<MapDevice>())
                 {
-                    if (!mapDevice.mapCamera.CompareTag("MapCamera"))
+                    if (mapDevice.mapCamera != null && !mapDevice.mapCamera.CompareTag("MapCamera"))
                     {
                         RenderTexture rt = RenderTexture.active;
                         RenderTexture.active = mapDevice.mapCamera.targetTexture;
