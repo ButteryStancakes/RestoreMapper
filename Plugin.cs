@@ -86,6 +86,20 @@ namespace RestoreMapper
             }
         }
 
+        // prevent a memory leak
+        [HarmonyPatch(typeof(MapDevice), nameof(MapDevice.Start))]
+        [HarmonyPrefix]
+        static bool MapDevicePreStart(MapDevice __instance)
+        {
+            if (__instance.mapCamera != null && !__instance.mapCamera.CompareTag("MapCamera"))
+            {
+                Plugin.Logger.LogWarning($"Mapper #{__instance.GetInstanceID()} tried to call Start() more than once, this is dangerous and would've caused a memory leak");
+                return false;
+            }
+
+            return true;
+        }
+
         [HarmonyPatch(typeof(MapDevice), nameof(MapDevice.Start))]
         [HarmonyPostfix]
         static void MapDevicePostStart(MapDevice __instance)
@@ -99,6 +113,7 @@ namespace RestoreMapper
 
             // get refs
             __instance.mapAnimatorTransition = __instance.mapCamera.GetComponentInChildren<Animator>();
+            __instance.mapAnimatorTransition.transform.localPosition = new(0f, 0f, -0.95f);
             __instance.mapLight = __instance.mapCamera.GetComponentInChildren<Light>();
 
             // performance
@@ -153,13 +168,13 @@ namespace RestoreMapper
         static bool GrabbableObjectPreUseItemBatteries(GrabbableObject __instance)
         {
             // can't be used in orbit, or if holding player is in the ship
-            return __instance is not MapDevice || (!StartOfRound.Instance.mapScreen.overrideCameraForOtherUse && (__instance.playerHeldBy == null || (!__instance.playerHeldBy.isInHangarShipRoom && !__instance.playerHeldBy.isInElevator)));
+            return __instance is not MapDevice || (!StartOfRound.Instance.mapScreen.overrideCameraForOtherUse && (__instance.playerHeldBy == null || ((!__instance.playerHeldBy.isInHangarShipRoom && !__instance.playerHeldBy.isInElevator) || !StartOfRound.Instance.mapScreen.cam.enabled)));
         }
 
         static IEnumerator pingMapSystem(MapDevice mapDevice, PlayerControllerB playerHeldBy)
         {
             mapDevice.mapCamera.gameObject.SetActive(true);
-            if (!GameNetworkManager.Instance.localPlayerController.isInHangarShipRoom && !GameNetworkManager.Instance.localPlayerController.isInElevator)
+            if (playerHeldBy == GameNetworkManager.Instance.localPlayerController && ((!GameNetworkManager.Instance.localPlayerController.isInHangarShipRoom && !GameNetworkManager.Instance.localPlayerController.isInElevator) || !StartOfRound.Instance.mapScreen.cam.enabled))
             {
                 mapDevice.mapAnimatorTransition.SetTrigger("Transition");
                 StartOfRound.Instance.mapScreenPlayerName.gameObject.SetActive(false);
