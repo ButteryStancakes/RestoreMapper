@@ -214,5 +214,13 @@ namespace RestoreMapper
                 }
             }
         }
+
+        [HarmonyPatch(typeof(MapDevice), nameof(MapDevice.EquipItem))]
+        [HarmonyPatch(typeof(MapDevice), nameof(MapDevice.DiscardItem))]
+        [HarmonyPostfix]
+        static void MapDevicePostItem(MapDevice __instance)
+        {
+            __instance.playerHeldBy.equippedUsableItemQE = false;
+        }
     }
 }
