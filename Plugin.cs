@@ -15,7 +15,7 @@ namespace RestoreMapper
     [BepInPlugin(PLUGIN_GUID, PLUGIN_NAME, PLUGIN_VERSION)]
     public class Plugin : BaseUnityPlugin
     {
-        const string PLUGIN_GUID = "butterystancakes.lethalcompany.restoremapper", PLUGIN_NAME = "Restore Mapper", PLUGIN_VERSION = "1.1.1";
+        const string PLUGIN_GUID = "butterystancakes.lethalcompany.restoremapper", PLUGIN_NAME = "Restore Mapper", PLUGIN_VERSION = "1.1.3";
         internal static new ManualLogSource Logger;
 
         void Awake()
@@ -111,7 +111,7 @@ namespace RestoreMapper
             RenderTexture orig = __instance.mapCamera.targetTexture;
             __instance.mapCamera = Object.Instantiate(__instance.mapCamera.gameObject, __instance.mapCamera.transform.parent).GetComponent<Camera>();
             __instance.mapCamera.tag = "Untagged";
-            __instance.mapCamera.targetTexture = new(orig.width, orig.height, orig.depth, orig.format);
+            __instance.mapCamera.targetTexture = new(/*orig.width*/ 655, /*orig.height*/ 455, orig.depth, orig.format);
             Plugin.Logger.LogDebug($"Mapper #{__instance.GetInstanceID()} cam&tex cloned");
 
             // get refs
@@ -202,7 +202,7 @@ namespace RestoreMapper
             // reset screens in orbit
             if (displayInfo)
             {
-                foreach (MapDevice mapDevice in Object.FindObjectsOfType<MapDevice>())
+                foreach (MapDevice mapDevice in Object.FindObjectsByType<MapDevice>(FindObjectsSortMode.None))
                 {
                     if (mapDevice.mapCamera != null && !mapDevice.mapCamera.CompareTag("MapCamera"))
                     {
