@@ -9,13 +9,15 @@ using System.Linq;
 using System.Reflection;
 using Unity.Netcode;
 using UnityEngine;
+using UnityEngine.Rendering;
+using UnityEngine.Rendering.HighDefinition;
 
 namespace RestoreMapper
 {
     [BepInPlugin(PLUGIN_GUID, PLUGIN_NAME, PLUGIN_VERSION)]
     public class Plugin : BaseUnityPlugin
     {
-        const string PLUGIN_GUID = "butterystancakes.lethalcompany.restoremapper", PLUGIN_NAME = "Restore Mapper", PLUGIN_VERSION = "1.1.3";
+        const string PLUGIN_GUID = "butterystancakes.lethalcompany.restoremapper", PLUGIN_NAME = "Restore Mapper", PLUGIN_VERSION = "1.2.0";
         internal static new ManualLogSource Logger;
 
         void Awake()
@@ -31,6 +33,8 @@ namespace RestoreMapper
     [HarmonyPatch]
     class RestoreMapperPatches
     {
+        static Texture scanline;
+
         [HarmonyPatch(typeof(Terminal), "Awake")]
         [HarmonyPostfix]
         static void TerminalPostAwake(Terminal __instance)
@@ -74,6 +78,7 @@ namespace RestoreMapper
             {
                 AssetBundle mapperBundle = AssetBundle.LoadFromFile(Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "restoremapper"));
                 mapperTool.itemIcon = mapperBundle.LoadAsset<Sprite>("MapperIcon");
+                scanline = mapperBundle.LoadAsset<Texture>("scanline");
                 mapperBundle.Unload(false);
                 Plugin.Logger.LogDebug("Assigned special icon");
             }
@@ -133,6 +138,16 @@ namespace RestoreMapper
             mats.FirstOrDefault(mat => mat.name.StartsWith("MapScreen")).mainTexture = __instance.mapCamera.targetTexture;
             rend.materials = mats;
             Plugin.Logger.LogDebug($"Mapper #{__instance.GetInstanceID()} screen retex'd");
+
+            // post processing from earlier versions
+            VolumeProfile profile = __instance.mapCamera.GetComponentInChildren<Volume>()?.profile;
+            profile.TryGet(out FilmGrain filmGrain);
+            if (filmGrain == null)
+                filmGrain = profile.Add<FilmGrain>();
+            filmGrain.type.Override(FilmGrainLookup.Custom);
+            filmGrain.texture.Override(scanline);
+            filmGrain.intensity.Override(1f);
+            filmGrain.response.Override(1f);
         }
 
         [HarmonyPatch(typeof(MapDevice), nameof(MapDevice.ItemActivate))]
