@@ -1,4 +1,6 @@
 ﻿using BepInEx;
+using BepInEx.Bootstrap;
+using BepInEx.Configuration;
 using BepInEx.Logging;
 using GameNetcodeStuff;
 using HarmonyLib;
@@ -17,12 +19,27 @@ namespace RestoreMapper
     [BepInPlugin(PLUGIN_GUID, PLUGIN_NAME, PLUGIN_VERSION)]
     public class Plugin : BaseUnityPlugin
     {
-        const string PLUGIN_GUID = "butterystancakes.lethalcompany.restoremapper", PLUGIN_NAME = "Restore Mapper", PLUGIN_VERSION = "1.2.0";
+        internal const string PLUGIN_GUID = "butterystancakes.lethalcompany.restoremapper", PLUGIN_NAME = "Restore Mapper", PLUGIN_VERSION = "1.2.1";
         internal static new ManualLogSource Logger;
+        internal static ConfigEntry<bool> configLowQuality;
+
+        const string GUID_LOBBY_COMPATIBILITY = "BMX.LobbyCompatibility";
 
         void Awake()
         {
             Logger = base.Logger;
+
+            if (Chainloader.PluginInfos.ContainsKey(GUID_LOBBY_COMPATIBILITY))
+            {
+                Logger.LogInfo("CROSS-COMPATIBILITY - Lobby Compatibility detected");
+                LobbyCompatibility.Init();
+            }
+
+            configLowQuality = Config.Bind(
+                "Performance",
+                "Low Quality",
+                false,
+                "Decreases the resolution of the mapper image (to match the radar camera) and disables film grain.\nThis will reduce memory usage and might also reduce lag spikes when activating the device.");
 
             new Harmony(PLUGIN_GUID).PatchAll();
 
@@ -116,7 +133,7 @@ namespace RestoreMapper
             RenderTexture orig = __instance.mapCamera.targetTexture;
             __instance.mapCamera = Object.Instantiate(__instance.mapCamera.gameObject, __instance.mapCamera.transform.parent).GetComponent<Camera>();
             __instance.mapCamera.tag = "Untagged";
-            __instance.mapCamera.targetTexture = new(/*orig.width*/ 655, /*orig.height*/ 455, orig.depth, orig.format);
+            __instance.mapCamera.targetTexture = new(Plugin.configLowQuality.Value ? orig.width : 655, Plugin.configLowQuality.Value ? orig.height : 455, orig.depth, orig.format);
             Plugin.Logger.LogDebug($"Mapper #{__instance.GetInstanceID()} cam&tex cloned");
 
             // get refs
@@ -140,14 +157,17 @@ namespace RestoreMapper
             Plugin.Logger.LogDebug($"Mapper #{__instance.GetInstanceID()} screen retex'd");
 
             // post processing from earlier versions
-            VolumeProfile profile = __instance.mapCamera.GetComponentInChildren<Volume>()?.profile;
-            profile.TryGet(out FilmGrain filmGrain);
-            if (filmGrain == null)
-                filmGrain = profile.Add<FilmGrain>();
-            filmGrain.type.Override(FilmGrainLookup.Custom);
-            filmGrain.texture.Override(scanline);
-            filmGrain.intensity.Override(1f);
-            filmGrain.response.Override(1f);
+            if (!Plugin.configLowQuality.Value)
+            {
+                VolumeProfile profile = __instance.mapCamera.GetComponentInChildren<Volume>()?.profile;
+                profile.TryGet(out FilmGrain filmGrain);
+                if (filmGrain == null)
+                    filmGrain = profile.Add<FilmGrain>();
+                filmGrain.type.Override(FilmGrainLookup.Custom);
+                filmGrain.texture.Override(scanline);
+                filmGrain.intensity.Override(1f);
+                filmGrain.response.Override(1f);
+            }
         }
 
         [HarmonyPatch(typeof(MapDevice), nameof(MapDevice.ItemActivate))]
