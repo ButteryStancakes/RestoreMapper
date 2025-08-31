@@ -2,7 +2,6 @@
 using BepInEx.Bootstrap;
 using BepInEx.Configuration;
 using BepInEx.Logging;
-using GameNetcodeStuff;
 using HarmonyLib;
 using System.Collections;
 using System.Collections.Generic;
@@ -12,7 +11,6 @@ using System.Reflection;
 using Unity.Netcode;
 using UnityEngine;
 using UnityEngine.Rendering;
-using UnityEngine.Rendering.HighDefinition;
 
 namespace RestoreMapper
 {
@@ -20,7 +18,7 @@ namespace RestoreMapper
     [BepInDependency(GUID_LOBBY_COMPATIBILITY, BepInDependency.DependencyFlags.SoftDependency)]
     public class Plugin : BaseUnityPlugin
     {
-        internal const string PLUGIN_GUID = "butterystancakes.lethalcompany.restoremapper", PLUGIN_NAME = "Restore Mapper", PLUGIN_VERSION = "1.2.2";
+        internal const string PLUGIN_GUID = "butterystancakes.lethalcompany.restoremapper", PLUGIN_NAME = "Restore Mapper", PLUGIN_VERSION = "1.3.0";
         internal static new ManualLogSource Logger;
         internal static ConfigEntry<bool> configLowQuality;
 
@@ -40,9 +38,12 @@ namespace RestoreMapper
                 "Performance",
                 "Low Quality",
                 false,
-                "Decreases the resolution of the mapper image (to match the radar camera) and disables film grain.\nThis will reduce memory usage and might also reduce lag spikes when activating the device.");
+                "Decreases the resolution of the mapper's image, to match the radar camera.\nThis will reduce memory usage and might also reduce lag spikes when activating the device.");
 
             new Harmony(PLUGIN_GUID).PatchAll();
+
+            RenderPipelineManager.beginCameraRendering += RenderingOverrides.OnBeginCameraRendering;
+            RenderPipelineManager.endCameraRendering += RenderingOverrides.OnEndCameraRendering;
 
             Logger.LogInfo($"{PLUGIN_NAME} v{PLUGIN_VERSION} loaded");
         }
@@ -51,11 +52,18 @@ namespace RestoreMapper
     [HarmonyPatch]
     class RestoreMapperPatches
     {
-        static Texture scanline;
+        internal static GameObject monitoringPlayerUIContainer;
 
-        [HarmonyPatch(typeof(Terminal), "Awake")]
+        [HarmonyPatch(typeof(StartOfRound), nameof(StartOfRound.Awake))]
         [HarmonyPostfix]
-        static void TerminalPostAwake(Terminal __instance)
+        static void StartOfRound_Post_Awake(StartOfRound __instance)
+        {
+            monitoringPlayerUIContainer = __instance.mapScreenPlayerName.transform.parent.gameObject;
+        }
+
+        [HarmonyPatch(typeof(Terminal), nameof(Terminal.Awake))]
+        [HarmonyPostfix]
+        static void Terminal_Post_Awake(Terminal __instance)
         {
             TerminalKeyword buy = __instance.terminalNodes?.allKeywords.FirstOrDefault(keyword => keyword.name == "Buy");
             TerminalNode buyMapper = buy?.compatibleNouns.FirstOrDefault(compatibleNoun => compatibleNoun.noun?.name == "Mapper").result;
@@ -96,7 +104,6 @@ namespace RestoreMapper
             {
                 AssetBundle mapperBundle = AssetBundle.LoadFromFile(Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "restoremapper"));
                 mapperTool.itemIcon = mapperBundle.LoadAsset<Sprite>("MapperIcon");
-                scanline = mapperBundle.LoadAsset<Texture>("scanline");
                 mapperBundle.Unload(false);
                 Plugin.Logger.LogDebug("Assigned special icon");
             }
@@ -112,7 +119,7 @@ namespace RestoreMapper
         // prevent a memory leak
         [HarmonyPatch(typeof(MapDevice), nameof(MapDevice.Start))]
         [HarmonyPrefix]
-        static bool MapDevicePreStart(MapDevice __instance)
+        static bool MapDevice_Pre_Start(MapDevice __instance)
         {
             if (__instance.mapCamera != null)
             {
@@ -125,7 +132,7 @@ namespace RestoreMapper
 
         [HarmonyPatch(typeof(MapDevice), nameof(MapDevice.Start))]
         [HarmonyPostfix]
-        static void MapDevicePostStart(MapDevice __instance)
+        static void MapDevice_Post_Start(MapDevice __instance)
         {
             if (!__instance.mapCamera.CompareTag("MapCamera"))
                 return;
@@ -134,13 +141,22 @@ namespace RestoreMapper
             RenderTexture orig = __instance.mapCamera.targetTexture;
             __instance.mapCamera = Object.Instantiate(__instance.mapCamera.gameObject, __instance.mapCamera.transform.parent).GetComponent<Camera>();
             __instance.mapCamera.tag = "Untagged";
-            __instance.mapCamera.targetTexture = new(Plugin.configLowQuality.Value ? orig.width : 655, Plugin.configLowQuality.Value ? orig.height : 455, orig.depth, orig.format);
-            Plugin.Logger.LogDebug($"Mapper #{__instance.GetInstanceID()} cam&tex cloned");
+            int width = 655, height = 455;
+            if (Plugin.configLowQuality.Value)
+            {
+                width = orig.width;
+                height = orig.height;
+            }
+            __instance.mapCamera.targetTexture = new(width, height, orig.depth, orig.format);
+            Plugin.Logger.LogDebug($"Mapper #{__instance.GetInstanceID()} camera and texture cloned");
 
             // get refs
             __instance.mapAnimatorTransition = __instance.mapCamera.GetComponentInChildren<Animator>();
             __instance.mapAnimatorTransition.transform.localPosition = new(0f, 0f, -0.95f);
             __instance.mapLight = __instance.mapCamera.GetComponentInChildren<Light>();
+            MapperScreen mapperScreen = __instance.mapCamera.gameObject.AddComponent<MapperScreen>();
+            mapperScreen.light = __instance.mapLight;
+            mapperScreen.transition = __instance.mapAnimatorTransition.GetComponent<Renderer>();
 
             // performance
             __instance.mapCamera.gameObject.SetActive(false);
@@ -148,6 +164,7 @@ namespace RestoreMapper
 
             // set up the light
             __instance.mapLight.enabled = false;
+            mapperScreen.transition.forceRenderingOff = true;
             Plugin.Logger.LogDebug($"Mapper #{__instance.GetInstanceID()} light setup");
 
             // assign texture to screen
@@ -155,33 +172,22 @@ namespace RestoreMapper
             Material[] mats = rend.materials;
             mats.FirstOrDefault(mat => mat.name.StartsWith("MapScreen")).mainTexture = __instance.mapCamera.targetTexture;
             rend.materials = mats;
-            Plugin.Logger.LogDebug($"Mapper #{__instance.GetInstanceID()} screen retex'd");
-
-            // post processing from earlier versions
-            if (!Plugin.configLowQuality.Value)
-            {
-                VolumeProfile profile = __instance.mapCamera.GetComponentInChildren<Volume>()?.profile;
-                profile.TryGet(out FilmGrain filmGrain);
-                if (filmGrain == null)
-                    filmGrain = profile.Add<FilmGrain>();
-                filmGrain.type.Override(FilmGrainLookup.Custom);
-                filmGrain.texture.Override(scanline);
-                filmGrain.intensity.Override(1f);
-                filmGrain.response.Override(1f);
-            }
+            Plugin.Logger.LogDebug($"Mapper #{__instance.GetInstanceID()} screen retextured");
         }
 
         [HarmonyPatch(typeof(MapDevice), nameof(MapDevice.ItemActivate))]
         [HarmonyPrefix]
-        static bool MapDeviceItemActivate(MapDevice __instance, /*bool used, bool buttonDown,*/ Coroutine ___pingMapCoroutine)
+        static bool MapDevice_Pre_ItemActivate(MapDevice __instance/*, bool used, bool buttonDown*/)
         {
             if (__instance.playerHeldBy == null || __instance.mapCamera.CompareTag("MapCamera"))
                 return true;
 
-            if (___pingMapCoroutine != null)
-                __instance.StopCoroutine(___pingMapCoroutine);
+            if (__instance.pingMapCoroutine != null)
+                __instance.StopCoroutine(__instance.pingMapCoroutine);
 
-            __instance.StartCoroutine(pingMapSystem(__instance, __instance.playerHeldBy));
+            if (__instance.mapCamera.TryGetComponent(out MapperScreen mapperScreen))
+                mapperScreen.target = __instance.playerHeldBy.transform;
+            __instance.StartCoroutine(pingMapSystem(__instance));
 
             // base.ItemActivate(used, buttonDown);
             return false;
@@ -189,7 +195,7 @@ namespace RestoreMapper
 
         [HarmonyPatch(typeof(NetworkBehaviour), nameof(NetworkBehaviour.OnDestroy))]
         [HarmonyPostfix]
-        static void NetworkBehaviourPostOnDestroy(NetworkBehaviour __instance)
+        static void NetworkBehaviour_Post_OnDestroy(NetworkBehaviour __instance)
         {
             if (__instance is MapDevice mapDevice && mapDevice.mapCamera != null && !mapDevice.mapCamera.CompareTag("MapCamera"))
             {
@@ -204,58 +210,119 @@ namespace RestoreMapper
 
         [HarmonyPatch(typeof(GrabbableObject), nameof(GrabbableObject.UseItemBatteries))]
         [HarmonyPrefix]
-        static bool GrabbableObjectPreUseItemBatteries(GrabbableObject __instance)
+        static bool GrabbableObject_Pre_UseItemBatteries(GrabbableObject __instance)
         {
-            // can't be used in orbit, or if holding player is in the ship
-            return __instance is not MapDevice || (!StartOfRound.Instance.mapScreen.overrideCameraForOtherUse && (__instance.playerHeldBy == null || ((!__instance.playerHeldBy.isInHangarShipRoom && !__instance.playerHeldBy.isInElevator) || !StartOfRound.Instance.mapScreen.cam.enabled)));
+            // can't be used in orbit
+            return __instance is not MapDevice || !StartOfRound.Instance.mapScreen.overrideCameraForOtherUse;
         }
 
-        static IEnumerator pingMapSystem(MapDevice mapDevice, PlayerControllerB playerHeldBy)
+        static IEnumerator pingMapSystem(MapDevice mapDevice)
         {
             mapDevice.mapCamera.gameObject.SetActive(true);
-            if (playerHeldBy == GameNetworkManager.Instance.localPlayerController && ((!GameNetworkManager.Instance.localPlayerController.isInHangarShipRoom && !GameNetworkManager.Instance.localPlayerController.isInElevator) || !StartOfRound.Instance.mapScreen.cam.enabled))
-            {
-                mapDevice.mapAnimatorTransition.SetTrigger("Transition");
-                StartOfRound.Instance.mapScreenPlayerName.gameObject.SetActive(false);
-            }
-            yield return new WaitForSeconds(0.035f);
-            Vector3 playerPos = playerHeldBy.transform.position;
-            playerPos.y += 3.636f;
-            mapDevice.mapCamera.transform.position = playerPos;
-            yield return new WaitForSeconds(0.2f);
-            mapDevice.mapLight.enabled = playerHeldBy.isInsideFactory || playerHeldBy.transform.position.y < -80f;
-            mapDevice.mapCamera.Render();
-            mapDevice.mapLight.enabled = false;
+            mapDevice.mapAnimatorTransition.SetTrigger("Transition");
+            yield return new WaitForSeconds(0.235f);
             mapDevice.mapCamera.gameObject.SetActive(false);
-            StartOfRound.Instance.mapScreenPlayerName.gameObject.SetActive(true);
             yield break;
         }
 
         [HarmonyPatch(typeof(StartOfRound), nameof(StartOfRound.SwitchMapMonitorPurpose))]
         [HarmonyPostfix]
-        static void PostSwitchMapMonitorPurpose(bool displayInfo)
+        static void StartOfRound_Post_SwitchMapMonitorPurpose(bool displayInfo)
         {
             // reset screens in orbit
             if (displayInfo)
             {
-                foreach (MapDevice mapDevice in Object.FindObjectsByType<MapDevice>(FindObjectsSortMode.None))
+                RenderTexture rt = RenderTexture.active;
+                MapDevice[] mapDevices = Object.FindObjectsByType<MapDevice>(FindObjectsSortMode.None);
+                foreach (MapDevice mapDevice in mapDevices)
                 {
                     if (mapDevice.mapCamera != null && !mapDevice.mapCamera.CompareTag("MapCamera"))
                     {
-                        RenderTexture rt = RenderTexture.active;
+                        mapDevice.mapCamera.gameObject.SetActive(false);
                         RenderTexture.active = mapDevice.mapCamera.targetTexture;
                         GL.Clear(true, true, Color.clear);
-                        RenderTexture.active = rt;
                     }
                 }
+                RenderTexture.active = rt;
             }
         }
 
         [HarmonyPatch(typeof(MapDevice), nameof(MapDevice.EquipItem))]
         [HarmonyPostfix]
-        static void MapDevicePostEquipItem(MapDevice __instance)
+        static void MapDevice_Post_EquipItem(MapDevice __instance)
         {
             __instance.playerHeldBy.equippedUsableItemQE = false;
+        }
+    }
+
+    internal class RenderingOverrides
+    {
+        static MapperScreen currentScreen;
+        static bool? noSignal;
+
+
+
+        public static void OnBeginCameraRendering(ScriptableRenderContext context, Camera camera)
+        {
+            currentScreen = camera.GetComponent<MapperScreen>();
+
+            ResetRendering();
+
+            if (currentScreen != null)
+            {
+                if (RestoreMapperPatches.monitoringPlayerUIContainer != null)
+                    RestoreMapperPatches.monitoringPlayerUIContainer.SetActive(false);
+
+                currentScreen.light.enabled = true;
+                currentScreen.transition.forceRenderingOff = false;
+
+                if (StartOfRound.Instance?.mapScreen != null)
+                {
+                    if (StartOfRound.Instance.mapScreen.LostSignalUI != null)
+                    {
+                        noSignal = StartOfRound.Instance.mapScreen.LostSignalUI.activeSelf;
+                        StartOfRound.Instance.mapScreen.LostSignalUI.SetActive(false);
+                    }
+
+                    // inside the building
+                    if (camera.transform.position.y < -80f)
+                    {
+                        camera.nearClipPlane = StartOfRound.Instance.mapScreen.cameraNearPlane;
+                        camera.farClipPlane = Mathf.Max(StartOfRound.Instance.mapScreen.cameraFarPlane, 7.52f);
+                    }
+                    else
+                    {
+                        // increased so it looks "correct" when using UniversalRadar
+                        camera.nearClipPlane = -22.47f;
+                        camera.farClipPlane = 27.52f;
+                    }
+                }
+            }
+        }
+
+        public static void OnEndCameraRendering(ScriptableRenderContext context, Camera camera)
+        {
+            ResetRendering();
+        }
+
+        static void ResetRendering()
+        {
+            if (RestoreMapperPatches.monitoringPlayerUIContainer != null)
+                RestoreMapperPatches.monitoringPlayerUIContainer.SetActive(true);
+
+            if (currentScreen != null)
+            {
+                currentScreen.light.enabled = false;
+                currentScreen.transition.forceRenderingOff = true;
+            }
+
+            if (StartOfRound.Instance?.mapScreen?.LostSignalUI != null)
+            {
+                if (noSignal.HasValue)
+                    StartOfRound.Instance.mapScreen.LostSignalUI.SetActive((bool)noSignal);
+            }
+
+            noSignal = null;
         }
     }
 }
