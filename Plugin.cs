@@ -2,6 +2,7 @@
 using BepInEx.Bootstrap;
 using BepInEx.Configuration;
 using BepInEx.Logging;
+using DunGen;
 using HarmonyLib;
 using System.Collections;
 using System.Collections.Generic;
@@ -18,9 +19,9 @@ namespace RestoreMapper
     [BepInDependency(GUID_LOBBY_COMPATIBILITY, BepInDependency.DependencyFlags.SoftDependency)]
     public class Plugin : BaseUnityPlugin
     {
-        internal const string PLUGIN_GUID = "butterystancakes.lethalcompany.restoremapper", PLUGIN_NAME = "Restore Mapper", PLUGIN_VERSION = "1.3.0";
+        internal const string PLUGIN_GUID = "butterystancakes.lethalcompany.restoremapper", PLUGIN_NAME = "Restore Mapper", PLUGIN_VERSION = "1.3.1";
         internal static new ManualLogSource Logger;
-        internal static ConfigEntry<bool> configLowQuality;
+        internal static ConfigEntry<bool> configLowQuality, configShowPath;
 
         const string GUID_LOBBY_COMPATIBILITY = "BMX.LobbyCompatibility";
 
@@ -33,6 +34,12 @@ namespace RestoreMapper
                 Logger.LogInfo("CROSS-COMPATIBILITY - Lobby Compatibility detected");
                 LobbyCompatibility.Init();
             }
+
+            configShowPath = Config.Bind(
+                "Gameplay",
+                "Show Path",
+                true,
+                "Should the mapper draw a line back to main entrance for its user?");
 
             configLowQuality = Config.Bind(
                 "Performance",
@@ -52,14 +59,8 @@ namespace RestoreMapper
     [HarmonyPatch]
     class RestoreMapperPatches
     {
-        internal static GameObject monitoringPlayerUIContainer;
-
-        [HarmonyPatch(typeof(StartOfRound), nameof(StartOfRound.Awake))]
-        [HarmonyPostfix]
-        static void StartOfRound_Post_Awake(StartOfRound __instance)
-        {
-            monitoringPlayerUIContainer = __instance.mapScreenPlayerName.transform.parent.gameObject;
-        }
+        internal static Vector3 mainEntrancePos;
+        internal static Bounds mineStartBounds;
 
         [HarmonyPatch(typeof(Terminal), nameof(Terminal.Awake))]
         [HarmonyPostfix]
@@ -138,9 +139,11 @@ namespace RestoreMapper
                 return;
 
             // copy the camera object
-            RenderTexture orig = __instance.mapCamera.targetTexture;
             __instance.mapCamera = Object.Instantiate(__instance.mapCamera.gameObject, __instance.mapCamera.transform.parent).GetComponent<Camera>();
             __instance.mapCamera.tag = "Untagged";
+
+            // copy the render texture
+            RenderTexture orig = __instance.mapCamera.targetTexture;
             int width = 655, height = 455;
             if (Plugin.configLowQuality.Value)
             {
@@ -151,11 +154,11 @@ namespace RestoreMapper
             Plugin.Logger.LogDebug($"Mapper #{__instance.GetInstanceID()} camera and texture cloned");
 
             // get refs
-            __instance.mapAnimatorTransition = __instance.mapCamera.GetComponentInChildren<Animator>();
-            __instance.mapAnimatorTransition.transform.localPosition = new(0f, 0f, -0.95f);
-            __instance.mapLight = __instance.mapCamera.GetComponentInChildren<Light>();
             MapperScreen mapperScreen = __instance.mapCamera.gameObject.AddComponent<MapperScreen>();
+            mapperScreen.cam = __instance.mapCamera;
+            __instance.mapLight = __instance.mapCamera.GetComponentInChildren<Light>();
             mapperScreen.light = __instance.mapLight;
+            __instance.mapAnimatorTransition = __instance.mapCamera.GetComponentInChildren<Animator>();
             mapperScreen.transition = __instance.mapAnimatorTransition.GetComponent<Renderer>();
 
             // performance
@@ -173,6 +176,9 @@ namespace RestoreMapper
             mats.FirstOrDefault(mat => mat.name.StartsWith("MapScreen")).mainTexture = __instance.mapCamera.targetTexture;
             rend.materials = mats;
             Plugin.Logger.LogDebug($"Mapper #{__instance.GetInstanceID()} screen retextured");
+
+            // minor fix - the green flash should cover the whole screen
+            __instance.mapAnimatorTransition.transform.localPosition = new(0f, 0f, -0.95f);
         }
 
         [HarmonyPatch(typeof(MapDevice), nameof(MapDevice.ItemActivate))]
@@ -253,39 +259,89 @@ namespace RestoreMapper
         {
             __instance.playerHeldBy.equippedUsableItemQE = false;
         }
+
+        [HarmonyPatch(typeof(RoundManager), nameof(RoundManager.FinishGeneratingNewLevelClientRpc))]
+        [HarmonyPostfix]
+        static void RoundManager_Post_FinishGeneratingNewLevelClientRpc(RoundManager __instance)
+        {
+            // https://github.com/ButteryStancakes/ButteryFixes/blob/da6acfca597c431ba0249a121883b8fae5574b07/Patches/General/RoundManagerPatches.cs#L190
+            EntranceTeleport mainEntrance = Object.FindObjectsByType<EntranceTeleport>(FindObjectsSortMode.None).FirstOrDefault(teleport => teleport.entranceId == 0 && !teleport.isEntranceToBuilding);
+            mainEntrancePos = mainEntrance != null ? mainEntrance.entrancePoint.position : Vector3.zero;
+
+            if (__instance.currentDungeonType == 4)
+            {
+                GameObject dungeonRoot = __instance.dungeonGenerator?.Root ?? GameObject.Find("/Systems/LevelGeneration/LevelGenerationRoot");
+                if (dungeonRoot == null)
+                {
+                    if (StartOfRound.Instance.currentLevel.name != "CompanyBuildingLevel")
+                        Plugin.Logger.LogWarning("Landed on a moon with no dungeon generated. This shouldn't happen");
+
+                    return;
+                }
+
+                foreach (Tile tile in dungeonRoot.GetComponentsInChildren<Tile>())
+                {
+                    if (tile.name.StartsWith("MineshaftStartTile"))
+                    {
+                        // reused and adapted from Mask Fixes
+                        // https://github.com/ButteryStancakes/MaskFixes/blob/165601d81827d368c119f12ced2bf8fdaffbeec8/Patches.cs#L621
+
+                        // calculate the bounds of the elevator start room
+                        // center:  ( -1,   51.37,  3.2 )
+                        // size:    ( 30,      20,   15 )
+                        Vector3[] corners =
+                        [
+                            new(-16f, 41.37f, -4.3f),
+                            new(14f, 41.37f, -4.3f),
+                            new(-16f, 61.37f, -4.3f),
+                            new(14f, 61.37f, -4.3f),
+                            new(-16f, 41.37f, 10.7f),
+                            new(14f, 41.37f, 10.7f),
+                            new(-16f, 61.37f, 10.7f),
+                            new(14f, 61.37f, 10.7f),
+                        ];
+                        tile.transform.TransformPoints(corners);
+
+                        // thanks Zaggy
+                        Vector3 min = corners[0], max = corners[0];
+                        for (int i = 1; i < corners.Length; i++)
+                        {
+                            min = Vector3.Min(min, corners[i]);
+                            max = Vector3.Max(max, corners[i]);
+                        }
+
+                        mineStartBounds = new()
+                        {
+                            min = min,
+                            max = max
+                        };
+                        Plugin.Logger.LogDebug("Calculated bounds for mineshaft elevator's start room");
+                    }
+                }
+            }
+        }
     }
 
     internal class RenderingOverrides
     {
         static MapperScreen currentScreen;
-        static bool? noSignal;
-
-
+        static bool? lineNotRendering;
 
         public static void OnBeginCameraRendering(ScriptableRenderContext context, Camera camera)
         {
-            currentScreen = camera.GetComponent<MapperScreen>();
-
             ResetRendering();
 
+            currentScreen = camera.GetComponent<MapperScreen>();
             if (currentScreen != null)
             {
-                if (RestoreMapperPatches.monitoringPlayerUIContainer != null)
-                    RestoreMapperPatches.monitoringPlayerUIContainer.SetActive(false);
-
                 currentScreen.light.enabled = true;
                 currentScreen.transition.forceRenderingOff = false;
+                currentScreen.line.forceRenderingOff = !currentScreen.drawPath;
 
                 if (StartOfRound.Instance?.mapScreen != null)
                 {
-                    if (StartOfRound.Instance.mapScreen.LostSignalUI != null)
-                    {
-                        noSignal = StartOfRound.Instance.mapScreen.LostSignalUI.activeSelf;
-                        StartOfRound.Instance.mapScreen.LostSignalUI.SetActive(false);
-                    }
-
-                    // inside the building
-                    if (camera.transform.position.y < -80f)
+                    // inside the building (or at the company)
+                    if (StartOfRound.Instance.currentLevelID == 3 || camera.transform.position.y < -80f)
                     {
                         camera.nearClipPlane = StartOfRound.Instance.mapScreen.cameraNearPlane;
                         camera.farClipPlane = Mathf.Max(StartOfRound.Instance.mapScreen.cameraFarPlane, 7.52f);
@@ -296,6 +352,9 @@ namespace RestoreMapper
                         camera.nearClipPlane = -22.47f;
                         camera.farClipPlane = 27.52f;
                     }
+
+                    lineNotRendering = StartOfRound.Instance.mapScreen.lineFromRadarTargetToExit.forceRenderingOff;
+                    StartOfRound.Instance.mapScreen.lineFromRadarTargetToExit.forceRenderingOff = true;
                 }
             }
         }
@@ -307,22 +366,20 @@ namespace RestoreMapper
 
         static void ResetRendering()
         {
-            if (RestoreMapperPatches.monitoringPlayerUIContainer != null)
-                RestoreMapperPatches.monitoringPlayerUIContainer.SetActive(true);
+            if (lineNotRendering.HasValue)
+            {
+                if (StartOfRound.Instance?.mapScreen?.lineFromRadarTargetToExit != null)
+                    StartOfRound.Instance.mapScreen.lineFromRadarTargetToExit.forceRenderingOff = (bool)lineNotRendering;
+
+                lineNotRendering = null;
+            }
 
             if (currentScreen != null)
             {
                 currentScreen.light.enabled = false;
                 currentScreen.transition.forceRenderingOff = true;
+                currentScreen.line.forceRenderingOff = true;
             }
-
-            if (StartOfRound.Instance?.mapScreen?.LostSignalUI != null)
-            {
-                if (noSignal.HasValue)
-                    StartOfRound.Instance.mapScreen.LostSignalUI.SetActive((bool)noSignal);
-            }
-
-            noSignal = null;
         }
     }
 }
