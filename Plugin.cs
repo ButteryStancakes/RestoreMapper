@@ -38,7 +38,7 @@ namespace RestoreMapper
             configShowPath = Config.Bind(
                 "Gameplay",
                 "Show Path",
-                true,
+                false,
                 "Should the mapper draw a line back to main entrance for its user?");
 
             configLowQuality = Config.Bind(
